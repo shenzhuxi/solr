@@ -1,0 +1,21 @@
+<?php
+function solr_ajax_search_info() {
+  return array(
+    'title' => 'Content', 
+    'path' => 'solr_ajax', 
+    'conditions_callback' => 'solr_ajax_conditions_callback',
+  );
+}
+
+function solr_ajax_search_execute($keys = NULL, $conditions = NULL) {
+  $solr = apachesolr_environment_load(apachesolr_default_environment());
+  drupal_add_js(array('solr_ajax' => array('solr_url' => $solr['url'])), 'setting');
+  $search_page = apachesolr_search_page_load('core_search');
+  $rows = $search_page['settings']['apachesolr_search_per_page'];
+  drupal_add_js(array('solr_ajax' => array('rows' => $rows)), 'setting');
+  
+  drupal_add_js(drupal_get_path('module', 'solr_ajax') . '/solr_ajax.js');
+  drupal_add_js(drupal_get_path('module', 'solr_ajax') . '/jsuri-1.1.1.min.js');
+  return array(array('link' => NULL,'title' => NULL));
+}
+

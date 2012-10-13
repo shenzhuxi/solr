@@ -1,0 +1,6 @@
+name = Solr Search
+description = High perform search for Apachesolr
+package = Search Toolkit
+core = 7.x
+dependencies[] = apachesolr
+dependencies[] = apachesolr_search

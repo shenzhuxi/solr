@@ -1,0 +1,192 @@
+<?php
+function solr_search_search_info() {
+  return array(
+    'title' => 'Content', 
+    'path' => 'solr_node', 
+    'conditions_callback' => 'solr_search_conditions_callback',
+  );
+}
+
+function solr_search_search_execute($keys = NULL, $conditions = NULL) {
+  //dpm($conditions);
+  $results = array();
+  $data = solr_search_request(rawurldecode($keys));
+  //dpm($data);
+  if ($data['response']['numFound'] == 0) {
+    return FALSE;
+  }
+  $total = $data['response']['numFound'];
+  $start = $data['response']['start'];
+  pager_default_initialize($total, solr_search_row());
+
+  foreach ($data['response']['docs'] as $key=>$doc) {
+    $result = array (
+      'link' => $doc['url'],
+      'title' => $doc['label'],
+      'snippet' => $data['highlighting'][$doc['id']]['content'][0],
+      'user' => theme('username', array('account' => user_load($doc['is_uid']))),
+      'date' => strtotime($doc['ds_created']),
+    );
+    $results[] = $result;
+  }
+  return $results;
+}
+
+function solr_search_request($q) {
+  $solr = apachesolr_environment_load(apachesolr_default_environment());
+  $rows = solr_search_row();
+  $params = array(
+    'q' => $q,
+    'wt' => 'phps',
+    'fl' => implode(',', array(
+      'id',
+      'entity_id',
+      'entity_type',
+      'bundle',
+      'bundle_name',
+      'label',
+      'is_comment_count',
+      'ds_created',
+      'ds_changed',
+      'score',
+      'path',
+      'url',
+      'is_uid',
+      'tos_name',
+    )),
+    'start' => isset($_GET['page']) ?  $_GET['page'] * $rows : 0,
+    'rows' => $rows,
+  );
+  if (empty($search_page['settings']['apachesolr_search_spellcheck'])) {
+    $params['spellcheck'] = 'false';
+  }
+  else {
+    $params['spellcheck'] = 'true';
+    $params['spellcheck.q'] = $q;
+  }
+  $params['fq'] = isset($conditions['fq']) ? $conditions['fq'] : array();
+  solr_search_add_boost_params($params);
+  $query = drupal_http_build_query($params);
+  $options = array(
+    'method' => 'POST',
+    //'headers' => $headers,
+    //'data' => $data,
+  );
+  $request = drupal_http_request($solr['url'] . '/select?' . $query, $options);
+  $response = unserialize($request->data);
+  return $response;
+}
+
+function solr_search_luke($env_id) {
+  $solr = apachesolr_environment_load($env_id);
+  $request = drupal_http_request($solr['url'] . '/admin/luke?wt=phps');
+  $cid = apachesolr_default_environment() . ":luke:";// . drupal_hash_base64($url);
+  $cache = cache_get($cid, 'cache_apachesolr');
+  if (isset($cache->data)) {
+    $luke = $cache->data;
+  }
+  else {
+    $luke = unserialize($request->data);
+    cache_set($cid, $luke, 'cache_apachesolr');
+  }
+  return $luke; 
+}
+
+function solr_search_add_boost_params(&$params) {
+  $env_id = apachesolr_default_environment();
+  $query_fields = array();
+
+  $defaults = array(
+    'content' => '1.0',
+    'ts_comments' => '0.5',
+    'tos_content_extra' => '0.1',
+    'label' => '5.0',
+    'tos_name' => '3.0',
+    'taxonomy_names' => '2.0',
+    'tags_h1' => '5.0',
+    'tags_h2_h3' => '3.0',
+    'tags_h4_h5_h6' => '2.0',
+    'tags_inline' => '1.0',
+    'tags_a' => '0',
+  );
+
+  $qf = apachesolr_environment_variable_get($env_id, 'field_bias', $defaults);
+  $luke = solr_search_luke($env_id);
+  $fields = $luke['fields'];
+  if ($qf && $fields) {
+    foreach ($fields as $field_name => $field) {
+      if (!empty($qf[$field_name])) {
+        $prefix = substr($field_name, 0, 3);
+        if ($field_name == 'content' || $prefix == 'ts_' || $prefix == 'tm_') {
+          // Normed fields tend to have a lower score. Multiplying by 40 is
+          // a rough attempt to bring the score in line with fields that are
+          // not normed.
+          $qf[$field_name] *= 40.0;
+        }
+        $query_fields[$field_name] = $field_name . '^' . $qf[$field_name];
+      }
+    }
+  }
+  $params['qf'] = implode(' ', $query_fields);
+  $date_settings = apachesolr_environment_variable_get($env_id, 'apachesolr_search_date_boost', '0:0');
+  $comment_settings = apachesolr_environment_variable_get($env_id, 'apachesolr_search_comment_boost', '0:0');
+  $changed_settings = apachesolr_environment_variable_get($env_id, 'apachesolr_search_changed_boost', '0:0');
+  $sticky_boost = apachesolr_environment_variable_get($env_id, 'apachesolr_search_sticky_boost', '0');
+  $promote_boost = apachesolr_environment_variable_get($env_id, 'apachesolr_search_promote_boost', '0');
+  // For the boost functions for the created timestamp, etc we use the
+  // standard date-biasing function, as suggested (but steeper) at
+  // http://wiki.apache.org/solr/SolrRelevancyFAQ#How_can_I_boost_the_score_of_newer_documents
+  // ms() returns the time difference in ms between now and the date
+  // The function is thus: $ab/(ms(NOW,date)*$steepness + $ab).
+  list($date_steepness, $date_boost) = explode(':', $date_settings);
+  if ($date_boost) {
+    $ab = 4 / $date_steepness;
+    $params['bf'][] = "recip(ms(NOW,ds_created),3.16e-11,$ab,$ab)^$date_boost";
+  }
+  // Boost on comment count.
+  list($comment_steepness, $comment_boost) = explode(':', $comment_settings);
+  if ($comment_boost) {
+    $params['bf'][] = "recip(div(1,max(is_comment_count,1)),$comment_steepness,10,10)^$comment_boost";
+  }
+  // Boost for a more recent comment or node edit.
+  list($changed_steepness, $changed_boost) = explode(':', $changed_settings);
+  if ($changed_boost) {
+    $ab = 4 / $changed_steepness;
+    $params['bf'][] = "recip(ms(NOW,ds_created),3.16e-11,$ab,$ab)^$changed_boost";
+  }
+  // Boost for nodes with sticky bit set.
+  if ($sticky_boost) {
+    $params['bq'][] = "bs_sticky:true^$sticky_boost";
+  }
+  // Boost for nodes with promoted bit set.
+  if ($promote_boost) {
+    $params['bq'][] = "bs_promote:true^$promote_boost";
+  }
+  // Modify the weight of results according to the node types.
+  $type_boosts = apachesolr_environment_variable_get($env_id, 'apachesolr_search_type_boosts', array());
+  if (!empty($type_boosts)) {
+    foreach ($type_boosts as $type => $boost) {
+      // Only add a param if the boost is != 0 (i.e. > "Normal").
+      if ($boost) {
+        $params['bq'][] = "bundle:$type^$boost";
+      }
+    }
+  }
+}
+
+/* for php 5.4 build-in server
+function solr_search_form_search_form_alter(&$form, $form_state) {
+  $form['basic']['keys']['#default_value'] = rawurldecode($form['basic']['keys']['#default_value']);
+}
+
+function solr_search_preprocess_search_results(&$variables) {
+  $variables['pager'] = rawurldecode($variables['pager']);
+}
+*/
+
+function solr_search_row() {
+  $solr = apachesolr_environment_load(apachesolr_default_environment());
+  $search_page = apachesolr_search_page_load('core_search');
+  $rows = $search_page['settings']['apachesolr_search_per_page'];
+  return $rows;
+}
