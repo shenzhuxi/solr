@@ -79,13 +79,13 @@ function solr_search_request($q) {
 
 function solr_search_luke($env_id) {
   $solr = apachesolr_environment_load($env_id);
-  $request = drupal_http_request($solr['url'] . '/admin/luke?wt=phps');
   $cid = apachesolr_default_environment() . ":luke:";// . drupal_hash_base64($url);
   $cache = cache_get($cid, 'cache_apachesolr');
   if (isset($cache->data)) {
     $luke = $cache->data;
   }
   else {
+    $request = drupal_http_request($solr['url'] . '/admin/luke?wt=phps');
     $luke = unserialize($request->data);
     cache_set($cid, $luke, 'cache_apachesolr');
   }
